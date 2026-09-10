@@ -1,0 +1,443 @@
+# Agentic RL：从偏好优化到工具调用
+
+> 个人学习笔记：从 MDP / POMDP 基础出发，整理 LLM 后训练、工具调用与 Agentic RL 的常见问题和代表工作。
+
+## 马尔可夫决策过程 (MDP)
+### 核心要素：通常写作五元组 $(\mathcal S, \mathcal A, P, R, \gamma)$
+
+- $\mathcal S$ (States)：状态集合。
+- $\mathcal A$ (Actions)：动作集合；智能体在状态 $s$ 下可采取的操作。
+- **$P(s'\mid s,a)$ (Transition)：**状态转移概率；执行动作 $a$ 后从 $s$ 到 $s'$ 的概率。
+- **$R(s,a,s')$ (Reward)：**即时奖励函数。写作 $R(s,a)$ 或 $R(s,a,s')$ 都是常见约定。
+- **$\gamma\in[0,1)$ (Discount)：**折扣因子，决定未来回报相对于即时奖励的权重。
+- **$\pi(a\mid s)$ (Policy)：**策略；给定状态时选择动作的概率分布。
+
+**马尔可夫性：**在给定当前状态与动作后，下一状态和奖励的分布与更早的历史无关。它不是“现实没有历史”，而是要求当前状态已充分概括了对未来有用的信息。
+## 部分可观测马尔可夫决策过程 (POMDP)
+
+现实任务往往不满足完全可观测的假设，因此使用更一般的 POMDP 建模。
+### 核心要素：在 MDP 基础上增加了 $(Ω, O)$
+
+- **$\Omega$ (Observations)：**观察集合；智能体实际能看到的信号。
+- **$O$ (Observation Function)：**观测模型。常见约定为 $O(o\mid s',a)$，即执行 $a$ 并到达新状态 $s'$ 后看到 $o$ 的概率；简化任务中也常写作 $P(o\mid s)$。
+
+关键区别是：智能体看不到真实状态 $s$，因此策略一般应依赖观察历史，或依赖由历史维护的**信念状态** $b(s)=P(s\mid o_{1:t},a_{1:t-1})$，而不只依赖当前单个 observation。
+
+### Planning
+| **范式**                | **做法**                                                          | **代表工作**                                                  |
+| --------------------- | --------------------------------------------------------------- | --------------------------------------------------------- |
+| RL as External Guide  | LLM 采样动作序列（如MCTS等结构化采样），通过 RL（如Q-Learning）训练critic网络评估并引导采样过程 | RAP、LATS、Learning-to-Plan、MAPF-DT、Planning without Search |
+| RL as Internal Driver | 通过 RL直接优化LLM生成动作序列的能力                                         | Voyager、DSP、AdaPlan、Planner-R1                            |
+
+如果在推理时介入 MCTS，它会在关键决策点生成并评估多条动作序列（trajectory / 思路分支），critic 可为搜索节点估计价值并帮助剪枝。此时提升的是**系统的 test-time search / planning 能力**，并不必然改变 LLM 的参数能力。
+
+Planning without Search例子
+
+> 图示：`Pasted image 20260603101407.png`（原图暂未导出到网页）
+
+
+### Tool Use
+
+#### ToolRL
+[Link](https://arxiv.org/pdf/2504.13958)
+
+> 图示：`Pasted image 20260707150515.png`（原图暂未导出到网页）
+
+训练模型的工具调用能力，可以看到reward由两部分组成format判定格式是否正确，还有正确性测试工具是否选取成功，参数名，以及参数具体值正确的个数
+实验发现在纯RL无sft下效果比做过一轮sft效果更好
+#### ReTool     
+[Link_bytedance](https://arxiv.org/pdf/2504.11536)
+
+> 图示：`Pasted image 20260707152731.png`（原图暂未导出到网页）
+
+核心思想：将一些数学推理转化为代码在sandbox中执行将返回结果加入上下文中（区别于上面的传统rl），利用可执行程序处理规则明确的步骤，减少生成过程中的漂移。
+
+#### ASPO    
+解决的主要问题是：尽早调用工具避免太长的CoT推理但是会暴露问题：
+$$A_i = \frac{R_i - \text{mean}(\mathbf{R})}{\text{std}(\mathbf{R})} = \frac{r'_i - \text{mean}(\mathbf{r'})}{\text{std}(\mathbf{r'})}$$
+全组模型都答对了题（基础分都是 1）。整个组内比拼的唯一标准变成了谁代码调用得早。如果一个样本答对了但是调用稍晚，它的 $A_i$ 就会变成**负值**，在策略梯度更新时直接被**反向惩罚**
+所以对
+$$A_i = A_{\text{correct}, i} + \text{clip}\left(\delta \cdot \frac{p_i - \text{mean}(\mathbf{p})}{\text{mean}(\mathbf{L})}, \; -k \cdot A_{\text{correct}, i}, \; k \cdot A_{\text{correct}, i}\right)$$
+Advantage进行了修改前半部分不变但是对于调用工具时间早晚的得分进行了约束，让得分的上下界限制在一个区间，当全组正确性没有区分度时，Clip 上下界缩小为 0，直接打断了时机惩罚
+#### **OTC-PO**    控制工具调用成本
+这个reward得分如果答错直接归0，做对了再谈调用效率问题
+$$r_{\phi}^{tool}(q, y) = \alpha \cdot r_{tool} \cdot r_{\phi}(q, y)$$
+**ppo**
+$$r_{tool} = \cos\left(\frac{m \cdot \pi}{2m + c}\right)$$
+因为还有critic 所以我们在ppo关注绝对分数 而c这个平滑常数
+- $c$ 越小：惩罚下降越快，表明对工具调用越严苛，极端鼓励少用工具。
+- $c$ 越大：惩罚下降越慢，给模型的容错空间更大，更包容复杂的工具多轮交互。
+**grpo**
+m：每个组内采样的轨迹得到一个估计调用次数的最佳数值（通常是一次rollout的最小值）
+n：该个轨迹中工具调用次数
+$$r_{tool} = \begin{cases} 1 & \text{if } f(m,n) = n = 0 \\ \cos\left(\frac{m * \pi}{2m + c}\right) & \text{if } n = 0 \\ \sin\left(\frac{f(m,n) * \pi}{2n}\right) & \text{otherwise} \end{cases}$$
+$$f(m,n) = \begin{cases} 0, & \text{if } m = 0 \text{ and } n = 0 \\ m, & \text{if } n = 0 \\ \dfrac{2nm}{m+n} & \text{otherwise} \end{cases}$$
+如果预计不需要调用并且也没有调用就直接给1的打分，一组内只有一条轨迹退化为ppo的判定方式$f(m,n)$即调和平均数看nm的相差成都
+
+
+> 图示：`Pasted image 20260708141823.png`（原图暂未导出到网页）
+
+思考🤔：在定位n时候就有组内相对评估的作用了 那这样在计算reward然后计算优势advantage的时候再次组内优势是不是有重复点 
+#### ARPO
+熵：模型在某个位置预测下一个token时概率分布，代表模型预测判断是笃定还是分散不确定
+$$H_t = -\sum_{v \in V} p_t(v)\, \log p_t(v)$$
+
+> 图示：`Pasted image 20260708154035.png`（原图暂未导出到网页）
+
+每次tool call后熵急剧增加（模型生成token不确定性增加，持续10-15token后回落），那么在这个熵增加点像树一样分叉出多条采样，也就是在模型困惑地方多次采样最后的rl效果是否能更好。
+
+> 图示：`Pasted image 20260708164006.png`（原图暂未导出到网页）
+
+$\Delta H_1 = \text{Normalize}(H_1 - H_{initial})$   每次tool call后的约10多个token计算平均熵然后归一化
+$P_{t}$​ 超过阈值$τ$则进行分支操作，
+最后的反向传播更新loss的时候对于共享部分看作单独的一次rollout
+例如重复部分是S1 然后独立的是I1和I2那么S1 I1和S1 I2看作两次不同的rollout选取的优势值也是A1和A2各自
+
+思考🤔：类似蒙特卡洛搜索树，但是不同的是外部的搜索和直接强化模型内部能力的不同
+
+#### AEPO
+ARPO的变体：
+1. rollout 坍缩，熵扎堆导致在少数困难轨迹上持续采样 
+2. 探到的高熵 token由于偏离严重 又被 clip 裁成零梯度 
+问题一解决办法：
+
+> 图示：`Pasted image 20260710145329.png`（原图暂未导出到网页）
+
+**① Entropy Monitoring Pre-exploration（熵预监控）
+- **Hroot​**：问题本身的不确定性，模型**读完问题、开始自己推理**、但**还没碰任何工具**时，这段初始生成 token 的熵有多少
+- **Htool_avg​**：工具调用带来的平均不确定性（各 Tool-call Step 后 Htool1​,Htool2​,Htool3​ 的平均）。
+$$M = \sigma\big(\beta (H_{root} - H_{tool_{avg}})\big)$$
+M大说明题目困难则多给全局轨迹采样
+M小说明问题相对简单但是tool_call引起很多不确定性
+**② Entropy-Guided Balanced Beaming（熵引导的平衡分支）**
+$$P_t = (\alpha + \beta \cdot \Delta H_t)(1 - \hat{P}(l))$$
+$\hat{P}(l)$ 代表当前路径已经分叉出的分支密度
+即便$\Delta H_t$ 极大，只要它上面已经分出了很多分支（$\hat{P}(l) \to 1$），$P_t$ 就会被**强行压低**
+
+
+针对问题二：
+除去正常情况如果触发clip 那么loss计算公式为：
+$$L_{aepo} = \text{sg}(L_{clip}) + \alpha \cdot \big(L_{raw} - \text{sg}(L_{raw})\big)$$
+在前向传播计算数值时，$\text{sg}(x)$ 在数值上完全等于 $x$
+所以$L_{aepo} = L_{clip}$ 
+在反向传播（Backward Pass）时：它会在计算图上切断（Stop）梯度的回流，对于任何参数 $\theta$，$\frac{\partial \text{sg}(x)}{\partial \theta} = 0$。
+$$\frac{\partial L_{aepo}}{\partial r_t} = \frac{\partial}{\partial r_t} \Big[ \text{sg}(L_{clip}) \Big] + \alpha \cdot \frac{\partial}{\partial r_t} \Big[ L_{raw} - \text{sg}(L_{raw}) \Big]$$
+$\nabla_\theta \mathcal{L}_{\text{aepo}} = \alpha \cdot \nabla_\theta \mathcal{L}_{\text{raw}}$
+这样的求导结果就保证了有探索性的高熵采样结果得到保留
+
+
+#### GiGPO 解决信用分配问题
+[Link](https://arxiv.org/pdf/2505.10978   )
+下面这幅图最左边是传统的GRPO然后中间是类似上面AEPO从当前节点开出新分支但是算力消耗巨大,最右侧是该算法匹配轨迹中的相似state（判定相似可能是余弦相似度等方法）然后再在组内计算优势和原先整个轨迹优势加权
+
+> 图示：`Pasted image 20260711172349.png`（原图暂未导出到网页）
+
+
+在对齐训练过程中优势Advantage计算时是根据整个trajectory但是这就引发了**稀疏奖励**问题
+也就是一次step的reward值可能需要看对之后步骤的影响
+$$A^{GiGPO} = A^E + w \cdot A^S$$
+$A^S$就会采用重新拉一个状态相同的组根据原先trajectory中长远折扣回报
+折扣因子 $\gamma$ （例如：计算$a_1^{(1)}$ 在step-level group中的reward值的时候$G_1^{(1)} = 0.95 \cdot r_2^{(1)} + 0.95^2 \cdot r_3^{(2)} + 0.95^3 \cdot r_4^{(1)}$ ）
+
+> 图示：`Pasted image 20260711173730.png`（原图暂未导出到网页）
+
+==解决稀疏奖励问题主要为了 并且没有造成巨大开销 对于那些中间步骤reward得分0但是对之后轨迹重要作用的step进行二次奖励==
+🤔思考：变体GAGPO就是针对GiGPO的
+# RLHF
+在这个后训练阶段我们主要有两个目标：
+
+1. **奖励最大化 (Reward Maximization)：** 让模型 $\pi$ 生成的回答 $y$ 在奖励函数 $r(x,y)$ 下得到更高分。
+2. **KL 约束 (KL Divergence Constraint)：** 要求新策略 $\pi$ 不要偏离参考策略 $\pi_{ref}$ 过远。
+
+$$J(\pi)=\mathbb E_{x\sim\mathcal D,\,y\sim\pi}[r(x,y)]-\beta D_{KL}(\pi\|\pi_{ref})$$
+
+### 典型 PPO-RLHF 流程
+1. **SFT：** 先得到 policy 初始化 $\pi_{\mathrm{SFT}}$。
+2. **RM 训练：** 以 base 或 SFT 模型为底座，用偏好对 $(x,y_w,y_l)$ 单独训练 reward model
+3. **在线 rollout：** 从 prompt 集合取 $x$，由当前 policy $\pi_\theta$ 采样 $y_{gen}$。这是 on-policy policy-gradient 所需的数据，而不只是为了“让 RM 打分”。
+4. **奖励与优势：** RM 对 $(x,y_{gen})$ 打分；PPO 通常再用 value/critic 估计 baseline，以降低 advantage 的方差。
+5. **PPO 更新：** 在 clipped surrogate objective 与 KL 约束下更新 policy，并周期性进行新的 rollout。
+
+# DPO
+
+DPO（Direct Preference Optimization）使用离线偏好对 $(x,y_w,y_l)$，直接优化当前 policy 相对 reference policy 的偏好概率。
+
+- **输入：** 同一 prompt 下的 chosen $y_w$ 与 rejected $y_l$。
+- **核心量：** 当前 policy 相对 $\pi_{\mathrm{ref}}$ 的对数概率变化。
+- **目标：** 提高 chosen 相对 rejected 的偏好，而不显式训练一个单独的 reward model。
+
+下面的推导先假设存在理想 reward $r(x,y)$。DPO 的出发点是带 KL 约束的 RL：
+
+$$
+\max_{\pi}\;
+\mathbb E_{x\sim\mathcal D}
+\left[
+\mathbb E_{y\sim\pi(y|x)}[r(x,y)]
+-\beta D_{\mathrm{KL}}
+\bigl(
+\pi(\cdot|x)\,\|\,\pi_{\mathrm{ref}}(\cdot|x)
+\bigr)
+\right].
+$$
+
+对固定 $x$，
+
+$$
+D_{\mathrm{KL}}
+\bigl(
+\pi(\cdot|x)\,\|\,\pi_{\mathrm{ref}}(\cdot|x)
+\bigr)
+=
+\mathbb E_{y\sim\pi(y|x)}
+\left[
+\log
+\frac{\pi(y|x)}
+{\pi_{\mathrm{ref}}(y|x)}
+\right].
+$$
+
+因此，上面的最大化问题与下列最小化问题有相同的最优 policy：
+
+$$
+\min_{\pi}\;
+\mathbb E_{x\sim\mathcal D}
+\mathbb E_{y\sim\pi(y|x)}
+\left[
+\log
+\frac{\pi(y|x)}
+{\pi_{\mathrm{ref}}(y|x)}
+-\frac{1}{\beta}r(x,y)
+\right].
+$$
+
+
+引入 $Z(x)$
+
+定义未归一化权重：
+
+$$
+\pi_{\mathrm{ref}}(y|x)
+\exp\left(\frac{r(x,y)}{\beta}\right).
+$$
+
+它以 reference policy 为底，并按 reward 对不同回答重新加权。由于它对所有 $y$ 的和通常不等于 1，需要引入归一化常数：
+
+$$
+Z(x)
+=
+\sum_y
+\pi_{\mathrm{ref}}(y|x)
+\exp\left(\frac{r(x,y)}{\beta}\right).
+$$
+
+于是：
+
+$$
+\pi^*(y|x)
+=
+\frac{1}{Z(x)}
+\pi_{\mathrm{ref}}(y|x)
+\exp\left(\frac{r(x,y)}{\beta}\right).
+$$
+
+对固定 $x$，$Z(x)$ 不依赖具体候选回答 $y$，并保证：
+
+$$
+\sum_y\pi^*(y|x)=1.
+$$
+
+由定义可得：
+
+$$
+\pi_{\mathrm{ref}}(y|x)
+\exp\left(\frac{r(x,y)}{\beta}\right)
+=
+Z(x)\pi^*(y|x).
+$$
+
+因此：
+
+$$
+\begin{aligned}
+\log\frac{\pi(y|x)}{\pi_{\mathrm{ref}}(y|x)}
+-\frac{1}{\beta}r(x,y)
+&=
+\log\frac{\pi(y|x)}{Z(x)\pi^*(y|x)} \\
+&=
+\log\frac{\pi(y|x)}{\pi^*(y|x)}
+-\log Z(x).
+\end{aligned}
+$$
+
+代回目标：
+
+$$
+\begin{aligned}
+&\min_{\pi}
+\mathbb E_{x\sim\mathcal D}
+\mathbb E_{y\sim\pi(y|x)}
+\left[
+\log\frac{\pi(y|x)}{\pi^*(y|x)}
+-\log Z(x)
+\right] \\
+={}&
+\min_{\pi}
+\mathbb E_{x\sim\mathcal D}
+\left[
+D_{\mathrm{KL}}
+\bigl(
+\pi(\cdot|x)\,\|\,\pi^*(\cdot|x)
+\bigr)
+-\log Z(x)
+\right].
+\end{aligned}
+$$
+
+$-\log Z(x)$ 不依赖待优化的 $\pi$，因此它不影响最优 policy。又因为 KL 散度非负，且仅当两个分布相同时取 0，所以：
+
+$$
+\pi_{\mathrm{optimal}}(y|x)
+=
+\pi^*(y|x)
+=
+\frac{1}{Z(x)}
+\pi_{\mathrm{ref}}(y|x)
+\exp\left(\frac{r(x,y)}{\beta}\right).
+$$
+
+回到RM：
+前面提到，DPO 不需要显式训练单独的 RM。  按照步骤我们可以表示出$r(x,y)$
+$$r^*(x, y) = \beta \log \frac{\pi^*(y|x)}{\pi_{\text{ref}}(y|x)} + \beta \log Z(x) $$
+BT模型中讲其代换：
+$$p^*(y_1 \succ y_2 | x) = \frac{\exp \left( \beta \log \frac{\pi^*(y_1|x)}{\pi_{\text{ref}}(y_1|x)} + \beta \log Z(x) \right)}{\exp \left( \beta \log \frac{\pi^*(y_1|x)}{\pi_{\text{ref}}(y_1|x)} + \beta \log Z(x) \right) + \exp \left( \beta \log \frac{\pi^*(y_2|x)}{\pi_{\text{ref}}(y_2|x)} + \beta \log Z(x) \right)}$$
+
+$$= \frac{1}{1 + \exp \left( \beta \log \frac{\pi^*(y_2|x)}{\pi_{\text{ref}}(y_2|x)} - \beta \log \frac{\pi^*(y_1|x)}{\pi_{\text{ref}}(y_1|x)} \right)}$$
+
+$$= \sigma \left( \beta \log \frac{\pi^*(y_1|x)}{\pi_{\text{ref}}(y_1|x)} - \beta \log \frac{\pi^*(y_2|x)}{\pi_{\text{ref}}(y_2|x)} \right)$$
+
+而loss函数
+$$L_{DPO}(\pi_\theta; \pi_{ref}) = -\mathbb{E}_{(x, y_w, y_l) \sim D} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)} \right) \right]$$
+把奖励函数部分带换掉
+**现在我们对梯度部分进行推导**：
+首先之前推导出来的RW函数：
+$$r(x, y_w) - r(x, y_l) = \beta \log \frac{\pi_\theta(y_w | x)}{\pi_{\text{ref}}(y_w | x)} - \beta \log \frac{\pi_\theta(y_l | x)}{\pi_{\text{ref}}(y_l | x)}$$
+$$\nabla_{\theta} \mathcal{L}_{\text{DPO}}(\pi_{\theta}; \pi_{\text{ref}}) = -\nabla_{\theta} \mathbb{E}_{(x, y_w, y_l) \sim D} \left[ \log \sigma \left( \beta \log \frac{\pi_{\theta}(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_{\theta}(y_l|x)}{\pi_{\text{ref}}(y_l|x)} \right) \right]$$
+**这一变换给出了 DPO 的核心：用 policy/reference 的对数概率比参数化隐式 reward difference，从而把偏好学习写成直接的 policy loss。它说明训练时无需显式拟合单独的 RM；并不是说真实偏好信息或奖励建模假设消失了。**
+
+后续梯度下降只是这一目标的具体参数更新过程，核心仍是上面的偏好差。
+$$\nabla_{\theta} \mathcal{L}_{\text{DPO}}(\pi_{\theta}; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l) \sim D} \left[ \frac{\sigma'(u)}{\sigma(u)} \nabla_{\theta}(u) \right],$$
+
+$u = \beta \log \frac{\pi_{\theta}(y_w | x)}{\pi_{\text{ref}}(y_w | x)} - \beta \log \frac{\pi_{\theta}(y_l | x)}{\pi_{\text{ref}}(y_l | x)}.$
+
+利用$σ′(x) = σ(x)(1 − σ(x)) and   σ(−x) = 1 − σ(x)$性质我们继续化简
+$$\frac{\sigma'(u)}{\sigma(u)} = 1 - \sigma(u) = \sigma(-u)$$
+
+$$-u = \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)} - \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)}$$
+
+$$\nabla_\theta (u) = \beta \left[ \nabla_\theta \log \pi_\theta(y_w|x) - \nabla_\theta \log \pi_\theta(y_l|x) \right]$$
+
+$$ = -\mathbb{E}_{(x, y_w, y_l) \sim D} \left[ \beta \sigma \left( \beta \log \frac{\pi_{\theta}(y_l | x)}{\pi_{\text{ref}}(y_l | x)} - \beta \log \frac{\pi_{\theta}(y_w | x)}{\pi_{\text{ref}}(y_w | x)} \right) \left[ \nabla_{\theta} \log \pi(y_w | x) - \nabla_{\theta} \log \pi(y_l | x) \right] \right]$$
+
+这里 $Z(x)$ 在同一 prompt 的 chosen/rejected 比较中抵消。PPO 通常额外使用 value/critic 作为 baseline 来降低 on-policy return 的方差；DPO 则在固定偏好数据上直接优化相对概率，因此不需要这个 PPO 式 critic。二者的差别来自目标与数据方式不同
+
+
+==补充回答强调次序并非2元对立==
+但是我们实际场景中，候选回答 $y$ 往往不止两个。 所以我们引入另一个概率模型：标准的 Plackett-Luce 概率模型
+- 首先，从 $K$ 个选项中选出最喜欢的（第 1 名），概率由 Softmax 决定。
+- 接着，从剩下的 $K-1$ 个选项中选出次喜欢的（第 2 名）。
+- 以此类推，直到选完。
+
+$$p^*(\tau | y_1, \dots, y_K, x) = \prod_{k=1}^K \frac{\exp(r^*(x, y_{\tau(k)}))}{\sum_{j=k}^K \exp(r^*(x, y_{\tau(j)}))}$$
+$$p^*(\tau | y_1, \dots, y_K, x) = \prod_{k=1}^K \frac{\exp \left( \beta \log \frac{\pi^*(y_{\tau(k)}|x)}{\pi_{\text{ref}}(y_{\tau(k)}|x)} \right)}{\sum_{j=k}^K \exp \left( \beta \log \frac{\pi^*(y_{\tau(j)}|x)}{\pi_{\text{ref}}(y_{\tau(j)}|x)} \right)}$$
+了解到这里我们需要和LOSS函数联系起来 我们的主要目的是模型越来越像人类
+
+ 如果我们已经观察到了一个真实的人类排序 $\tau$，什么样的模型参数能让这个结果“看起来最合理（概率最大）”？
+
+我们希望模型 $\pi_\theta$ 表现得越像人类越好，所以我们的目标是：**最大化**观察到的数据在模型下的概率。
+
+$$\max \prod_{(x, \tau) \in \mathcal{D}} p(\tau | x; \theta)$$
+
+$$\mathcal{L}_{\text{DPO}}(\pi_\theta, \pi_{\text{ref}}) = -\mathbb{E}_{\tau, y_1, \dots, y_K, x \sim \mathcal{D}} \left[ \log \prod_{k=1}^K \frac{\exp \left( \beta \log \frac{\pi_\theta(y_{\tau(k)}|x)}{\pi_{\text{ref}}(y_{\tau(k)}|x)} \right)}{\sum_{j=k}^K \exp \left( \beta \log \frac{\pi_\theta(y_{\tau(j)}|x)}{\pi_{\text{ref}}(y_{\tau(j)}|x)} \right)} \right]$$
+最大化似然等价于最小化其负对数；取 log 也能避免连乘带来的数值问题。
+
+==Q1:**既然任何一个奖励函数都可以被重参数化为‘策略模型 π 与参考模型 πref​ 的概率对数比’，那么，是否存在两个概率分布完全不同（π=π′）的策略模型，它们各自构建出的概率对数比，在数学上却对应着同一个等价类中的奖励函数呢？**==
+
+假设存在两个奖励函数 $r$ 和 $r'$ 属于同一个等价类，且 $f(x)$ 仅与 $x$ 相关：
+
+$$r'(x, y) = r(x, y) + f(x)$$代入 $r$ 和 $r'$：
+
+$$\beta \log \frac{\pi'(y|x)}{\pi_{ref}(y|x)} = \beta \log \frac{\pi(y|x)}{\pi_{ref}(y|x)} + f(x)$$
+
+$$\beta \log \frac{\pi'(y|x)}{\pi_{ref}(y|x)} = \beta \log \frac{\pi(y|x)}{\pi_{ref}(y|x)} + \beta \log \left( \exp \left( \frac{1}{\beta} f(x) \right) \right)$$
+
+$$\beta \log \frac{\pi'(y|x)}{\pi_{ref}(y|x)} = \beta \log \left( \frac{\pi(y|x)}{\pi_{ref}(y|x)} \cdot \exp \left( \frac{1}{\beta} f(x) \right) \right)$$
+
+$$\pi'(y|x) = \pi(y|x) \exp \left( \frac{1}{\beta} f(x) \right)$$
+
+π 和 π′ 都是**语言模型**，语言模型输出的是概率分布所以加起必须等于 1
+
+$$1 = 1* \exp \left( \frac{1}{\beta} f(x) \right)$$
+所以f(x)=0 所以两个模型是一致的（至于为什么两者差一个关于x函数的项可以看下论文证明 这里不做太多介绍）
+
+==Q2:DPO对比PPO到底有哪些优劣==
+**在线采样：**PPO 需要由当前 policy 产生 on-policy rollout，才能估计 policy gradient；RM 只是为这些 rollout 提供奖励。DPO 使用固定的离线偏好对，不需要在线 rollout，也不需要单独的 RM 打分。固定偏好对上的训练可能是 DPO 或其他离线偏好优化，**不必然**退化为 SFT；区别在于：
+SFT 只看一个目标：
+
+$$Loss_{SFT} = -\log \pi_\theta(y_w | x)$$
+
+它只管把 $y_w$ 的概率拉高。
+DPO 关注的是**相对偏好**。你看它的公式里有两项：
+
+$$Loss_{DPO} \propto \log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)} - \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)}$$
+它会提高 $y_w$ 相对 $y_l$ 的偏好，并通过 reference ratio 隐式施加对参考策略的约束。DPO 的代价是训练数据分布固定，无法像 on-policy RL 那样从当前模型的新行为中继续采样、打分和改进。
+**通常省去单独的 PPO value/critic 模型。**
+
+
+# GRPO
+
+> 图示：`Pasted image 20260420191513.png`（原图暂未导出到网页）
+$$\mathcal{J}_{GRPO}(\theta) = \mathbb{E} \left[ q \sim P(Q), \{o_i\}_{i=1}^G \sim \pi_{\theta_{old}}(O|q) \right]$$  **$q \sim P(Q)$**：从问题分布中随机抽取一个问题 $q$
+ **$\{o_i\}_{i=1}^G \sim \pi_{\theta_{old}}(O|q)$**：针对同一个问题 $q$，让**旧的策略模型**（即当前的权重）生成一组（$G$ 个）不同的回答。我们希望这个J可以最大话也就是Loss最小
+$$\frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \left\{ \min \left[ \frac{\pi_\theta(o_{i,t}|q, o_{i,<t})}{\pi_{\theta_{old}}(o_{i,t}|q, o_{i,<t})} \hat{A}_{i,t}, \text{clip} \left( \frac{\pi_\theta(o_{i,t}|q, o_{i,<t})}{\pi_{\theta_{old}}(o_{i,t}|q, o_{i,<t})}, 1-\varepsilon, 1+\varepsilon \right) \hat{A}_{i,t} \right] - \beta \mathbb{D}_{KL} [\pi_\theta || \pi_{ref}] \right\}$$
+
+$G$ 是你同时生成的回答个数（Group Size）。这一项是对这 $G$ 个回答的结果求平均
+$|o_i|$ 是第 $i$ 个回答包含的 **Token 总数**（也就是回答的长度）。这一项是对该回答里的每一个字（Token）产生的损失求平均
+
+看一下整个式子：
+$$\min \left[ \frac{\pi_\theta}{\pi_{\theta_{old}}} \hat{A}_{i,t}, \text{clip} \left( \frac{\pi_\theta}{\pi_{\theta_{old}}}, 1-\varepsilon, 1+\varepsilon \right) \hat{A}_{i,t} \right]$$
+
+- **重要性采样比率**：$\frac{\pi_\theta}{\pi_{\theta_{old}}}$ 衡量了新旧策略的差异。
+- **Clip 函数**：如果新策略偏离旧策略太远（超过 $\varepsilon$），就强行“拉回来”，防止参数更新步子迈得太大导致模型崩掉。
+- **$\hat{A}_{i,t}$ (优势函数)**：这是 GRPO 的灵魂所在。
+图片公式中虽然写的是 $\hat{A}_{i,t}$，但在 GRPO 的论文中，这个值的计算不再依赖 Critic 模型，而是：
+$\hat{A}_i = \frac{r_i-\mu_g}{\sigma_g+\epsilon}$
+
+- 对同一个 prompt 的 $G$ 个输出，先计算各自的 completion / trajectory-level reward $r_i$（可来自规则 verifier 或 RM），再得到组均值 $\mu_g$ 与组标准差 $\sigma_g$；$\epsilon$ 用于避免标准差为零时数值不稳定。
+- **归一化：**用当前回答的 reward 减去组均值，再除以组标准差加稳定项。
+- **token loss：**在常见 outcome-reward 版本中，同一条 completion 的 $\hat A_i$ 会用于该 completion 的各个 token loss；不同实现对标准差、长度归一化、KL 估计和 clip 细节可能不同。
+- **直观理解：**得分高于本组平均水平时 $\hat A_i>0$，模型会被鼓励；反之被抑制。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

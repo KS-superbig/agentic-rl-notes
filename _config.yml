@@ -1,0 +1,6 @@
+title: Agentic RL Notes
+description: 从偏好优化到工具调用的学习笔记
+theme: jekyll-theme-minimal
+markdown: kramdown
+kramdown:
+  math_engine: mathjax
